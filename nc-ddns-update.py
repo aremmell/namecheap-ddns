@@ -18,7 +18,7 @@ def build_argparser():
     
     argparser.add_argument('-d', '--domain', help='The TLD (top-level domain) to update the DNS record for', required=True, type=str)
     argparser.add_argument('-p', '--password', help='Your Namecheap DDNS password', required=True, type=str)
-    argparser.add_argument('-i', '--ip', help='The IPv4 address to set the A record to', required=True, type=str)
+    argparser.add_argument('-i', '--ip', help='The IPv4 address to set the A record to. If omitted, the server will use your client address.', required=False, type=str)
     
     return argparser
 
