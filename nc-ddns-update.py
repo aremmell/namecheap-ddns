@@ -10,8 +10,6 @@
 # (e.g. via cron) updating of Namecheap DDNS records.
 #
 # @author Ryan M. Lederman <lederman@gmail.com>
-# @date 11 May 2023
-# @version 0.1.0a
 # @copyright The MIT License (MIT)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -31,29 +29,72 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
+
+__version__ = "0.1.1b"
+
 import sys
-import urllib.request
-import urllib.parse
-import urllib.error
-from requests import get
-from requests import exceptions
+import requests
 import argparse
 import logging
 import re
-#import pdb; pdb.set_trace();
+import typing
+import time
 
 # The default service for resolution of public IP addresses.
-ip_service = "https://api.ipify.org/"
+# There is a command-line option to override it, but unless it's
+# not working, I wouldn't recommend changing it.
+IP_SERVICE = "https://api.ipify.org/"
 
 # The default timeouts for an HTTP GET request, in seconds (connect, read).
-http_timeouts = (3.05, 27)
+HTTP_TIMEOUTS = (3.05, 27)
 
-# builds the query string for the HTTP GET request.
-def build_query_string(domain, password, ip):
-    dict = {'host': '@', 'domain': domain, 'password': password};
-    if ip is not None:
-        dict['ip'] = ip
-    return urllib.parse.urlencode(dict)
+# Namecheap DDNS API endpoint
+NC_DDNS_URL = "https://dynamicdns.park-your-domain.com/update"
+
+#=======================================================================#
+
+# base ANSI escape code generation
+def ansi_esc(codes: str) -> str:
+    return f'\x1b[{codes}m'
+
+# ansi escape reset
+def ansi_esc_reset() -> str:
+    return ansi_esc('0')
+
+# ansi escape bold
+def ansi_esc_bold(s: str) -> str:
+    return f'{ansi_esc("1")}{s}{ansi_esc_reset()}'
+
+# performs an HTTP GET request
+def do_http_get_request(url: str, payload: dict[str, str] = dict(),
+                        headers: dict[str, str] = dict()) -> requests.Response | None:
+    try:
+        headers['User-Agent'] = "nc-ddns-update.py/%s" % __version__
+        logging.debug("Performing GET request to '%s' with params: '%s', headers: '%s',"
+                      " and timeouts (conn, read): %s..." % (url, payload, headers, HTTP_TIMEOUTS))
+        
+        t_start = time.perf_counter_ns()
+        r = requests.get(url, params=payload, headers=headers, timeout=HTTP_TIMEOUTS)
+        t_end = time.perf_counter_ns()
+
+        if r.status_code != requests.codes.ok:
+            r.raise_for_status()
+        else:
+            logging.debug("Request successful (%.02fsec)" % ((t_end - t_start) / 1000000000))
+        return r
+    
+    except requests.exceptions.ConnectionError as e:
+        logging.error("Failed to connect to server: %s" % e)
+        return None
+    except requests.exceptions.HTTPError as e:
+        logging.error("Server returned an HTTP error code: %s" % e)
+        return None
+    except requests.exceptions.Timeout as e:
+        logging.error("Request timed out: %s" % e)
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error("Caught HTTP exception: %s" % e)
+        return None
 
 # builds the command-line argument configuration and parser.
 def build_cli_parser():
@@ -77,6 +118,8 @@ def build_cli_parser():
         dest='command',
         required=True
     )
+
+    # update command
 
     sp_update = subparsers.add_parser(
         name='update',
@@ -119,7 +162,7 @@ def build_cli_parser():
         default=None
     )    
 
-    # ======================================================================#
+    # resolve command
 
     sp_resolve = subparsers.add_parser(
         name='resolve',
@@ -131,7 +174,7 @@ def build_cli_parser():
         '-s',
         '--service',
         help='If specified, override the third-party service used to resolve' +
-             ' your public IP address. (default: %s)' % ip_service +
+             ' your public IP address. (default: %s)' % IP_SERVICE +
              ' Note: the service must return a plaintext/JSON or other human-' +
              'readable format; this script does not modify the response body.',
         required=False,             
@@ -141,17 +184,16 @@ def build_cli_parser():
 
     return argparser
 
-def parse_xml_response(xml_data):
+def parse_xml_response(xml_data: str):
     logging.debug("XML response body:\n%s\n" % xml_data)
     logging.debug("Using regex to parse XML...")
 
     # searches the XML for a pattern, and returns the match if found.
     # returns None otherwise.
-    def search_xml(pattern, flags):
+    def search_xml(pattern: str, flags: re.RegexFlag) -> re.Match[str] | None:
         logging.debug("Searching regex pattern: '%s'..." % pattern)
 
         m = re.search(pattern, xml_data, flags)
-                
         if m is None:
             logging.debug("No match: '%s'" % pattern)            
         else:
@@ -160,11 +202,10 @@ def parse_xml_response(xml_data):
         return m
     
     # same as the above, but returns more than one match (global search)
-    def findall_xml(pattern, flags):
+    def findall_xml(pattern: str, flags: re.RegexFlag) -> list[typing.Any]:
         logging.debug("Searching all instances of pattern: '%s'..." % pattern)
 
         m = re.findall(pattern, xml_data, flags);
-
         if type(m) is list and len(m) > 0:
             logging.debug("Match(es): %s" % m);
         else:
@@ -220,7 +261,6 @@ def parse_xml_response(xml_data):
                                 this_response += m4[i][n]
                                 if n <= 1: this_response += ": "
                             final_err_set.append(this_response);
-        
         # if final_err_set is empty, no errors were found, and it's time
         # to move on to searching for known success patterns.
         if len(final_err_set) == 0:
@@ -236,12 +276,12 @@ def parse_xml_response(xml_data):
                 else:
                     all_succeeded = False
             if all_succeeded:
-                logging.info("Successfully updated A record with IP: '%s'",
-                             final_result);
+                logging.info("Successfully updated A record with IP: %s",
+                             ansi_esc_bold(final_result));
             return all_succeeded
         else: # all done; print final list of errors and return.
             logging.error("Failed to update A record! Found these error(s) in"
-                            " the response body:\n");
+                          " the response body:\n");
             for e in range(len(final_err_set)):
                 logging.error("\t%d: '%s'" % (e + 1, final_err_set[e]))
 
@@ -249,71 +289,50 @@ def parse_xml_response(xml_data):
     except re.error as e:
         logging.error("regex exception: %s" % e)
         return False
-
+    
 # entry point for the 'update' command
-def do_update_request(arg_ns):
-    data = build_query_string(arg_ns.domain, arg_ns.password, arg_ns.ip)
+def do_update_request(arg_ns: argparse.Namespace):
+    payload = dict(host = '@', domain = arg_ns.domain, password = arg_ns.password)
+    if (arg_ns.ip is not None):
+        payload['ip'] = arg_ns.ip
 
-    if logging.getLogger().level == logging.DEBUG:
-        https_level = 3
-    else:
-        https_level = 0
-
-    try:
-        https_handler = urllib.request.HTTPSHandler(debuglevel=https_level, check_hostname=True)
-        opener = urllib.request.build_opener(https_handler)
-        with opener.open("https://dynamicdns.park-your-domain.com/update?%s" % data) as f:
-            if f.status != 200:
-                logging.error("Couldn't update A record for %s: HTTP GET request" +
-                            " to %s failed! code: %d, response body: '%s'"
-                            % arg_ns.domain % f.geturl() % f.status % f.read().decode('utf-8'))
-                return False
-            else:
-                logging.debug("Got 200 OK; parsing response body...");
-                return parse_xml_response(f.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        logging.error("HTTP exception: %s", e)
+    req = do_http_get_request(NC_DDNS_URL, payload)
+    if req is None:
+        logging.error("Failed to update A record!")
         return False
-
+    else:
+        return parse_xml_response(req.text)
+   
 # entry point for the 'resolve' command
-def do_resolve_request(arg_ns):
+def do_resolve_request(arg_ns: argparse.Namespace):
     if arg_ns.service is not None:
         svc = arg_ns.service
     else:
-        svc = ip_service
+        svc = IP_SERVICE
     
-    try:
-        logging.debug("Starting GET request to %s...", svc);
-        my_ip = get(svc, timeout=http_timeouts)
-
-        if my_ip.status_code != 200 or my_ip.text is None:
-            logging.error("Couldn't determine your IP address: HTTP GET " + 
-                            "request to %s failed! code: %d, response body:\n'%s'"
-                            % (svc, my_ip.status_code, my_ip.text))
-            return False
-        else:
+    req = do_http_get_request(svc)
+    if req is None:
+        logging.error("Failed to resolve your public IP address!")
+        return False
+    else:
+        try:
             ip_v4_pattern = r'^[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}$'
-            m = re.fullmatch(ip_v4_pattern, my_ip.text, re.A)
+            m = re.fullmatch(ip_v4_pattern, req.text, re.A)
             if m:
-                logging.info("Success! Your public IP address is: %s" % my_ip.text)
+                logging.info("Success! Your public IP address is: %s" % ansi_esc_bold(req.text))
                 return True
             else:
-                logging.error(my_ip.text);
+                logging.error(req.text);
                 logging.error("The response body from %s isn't an IPv4 address!" % svc)
                 return False
-    except re.error as rex:
-        logging.error("regex exception: %s" % rex)
-        return False
-    except exceptions.RequestException as e:
-        logging.error("HTTP exception: %s", e);
-        return False
+        except re.error as rex:
+            logging.error("regex exception: %s" % rex)
+            return False
 
 # script entry point
 if __name__ == "__main__":
     argparser = build_cli_parser()
     arg_ns = argparser.parse_args()
-
-    print(arg_ns)
 
     if arg_ns.debug:
         level = logging.DEBUG
@@ -321,13 +340,14 @@ if __name__ == "__main__":
         level = logging.INFO
 
     logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=level)
+    logging.debug("argparse NS: %s" % arg_ns)
     logging.info("Logging initialized with level: %s" % logging.getLevelName(level))
     logging.info("Executing command: '%s'..." % arg_ns.command)
 
     if arg_ns.command == 'resolve':
-        exit_code = not do_resolve_request(arg_ns)
+        exit_code = 0 if do_resolve_request(arg_ns) else 1
     elif arg_ns.command == 'update':
-        exit_code = not do_update_request(arg_ns)
+        exit_code = 0 if do_update_request(arg_ns) else 1
     else:
         logging.error("Unknown command: %s" % arg_ns.command)
         exit_code = 1
