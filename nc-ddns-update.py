@@ -46,10 +46,16 @@ import time
 IP_SERVICE = "https://api.ipify.org/"
 
 # The default timeouts for an HTTP GET request, in seconds (connect, read).
-HTTP_TIMEOUTS = (3.05, 27)
+HTTP_TIMEOUTS = (9.05, 27.05)
+
+# A number that represents infinity.
+INFINITY = -1
 
 # Namecheap DDNS API endpoint
 NC_DDNS_URL = "https://dynamicdns.park-your-domain.com/update"
+
+# The GitHub repository that this script was born in.
+NC_DDNS_GH_REPO = "https://github.com/aremmell/namecheap-ddns"
 
 #=======================================================================#
 
@@ -61,9 +67,18 @@ def ansi_esc(codes: str) -> str:
 def ansi_esc_reset() -> str:
     return ansi_esc('0')
 
-# ansi escape bold
-def ansi_esc_bold(s: str) -> str:
-    return f'{ansi_esc("1")}{s}{ansi_esc_reset()}'
+# ansi escape: basic 4-bit bold/dim, foreground, background
+def ansi_esc_basic(msg: str, attr: int = 0, fg: int = 39, bg: int = 49) -> str:
+    return f'{ansi_esc(f"{str(attr)};{str(fg)};{str(bg)}")}{msg}{ansi_esc_reset()}'
+
+def ansi_esc_error(msg: str) -> str:
+    return ansi_esc_basic(msg, 1, 31)
+
+def ansi_esc_success(msg: str) -> str:
+    return ansi_esc_basic(msg, 1, 32)
+
+def ansi_esc_warning(msg: str) -> str:
+    return ansi_esc_basic(msg, 1, 33)
 
 # performs an HTTP GET request
 def do_http_get_request(url: str, payload: dict[str, str] = dict(),
@@ -82,7 +97,22 @@ def do_http_get_request(url: str, payload: dict[str, str] = dict(),
         else:
             logging.debug("Request successful (%.02fsec)" % ((t_end - t_start) / 1000000000))
         return r
-    
+    # ok there are at least 3 distinct ways in which the requests can fail:
+    # timeout;
+    # connection error;
+    # HTTP error code (e.g. 404, 500, etc.)
+    #
+    # for the first two, i think it's safe to reuse the same retry count
+    # and interval (maybe a longer interval for connection error, because
+    # it could indicate some local DNS resolution or general tubes issue).
+    #
+    # for HTTP error codes, there are only a couple we should retry:
+    #
+    # 429 (rate limiting) – back off and try later (Reply contains 'Retry-After' in seconds)
+    # 500 internal server error
+    # 502 bad gateway
+    # 503 service unavailable (also contains Retry-After)
+    # 504 gateway timeout
     except requests.exceptions.ConnectionError as e:
         logging.error("Failed to connect to server: %s" % e)
         return None
@@ -101,8 +131,8 @@ def build_cli_parser():
     argparser = argparse.ArgumentParser(
         prog="nc-ddns-update.py",
         description="Namecheap Dynamic DNS utilities.",
-        epilog="For updates, filing bug reports, making feature requests, etc.," +
-               " visit https://github.com/aremmell/namecheap-ddns."        
+        epilog=f"For updates, filing bug reports, making feature requests, etc.," +
+               " visit {NC_DDNS_GH_REPO}."        
     )
 
     argparser.add_argument(
@@ -119,7 +149,9 @@ def build_cli_parser():
         required=True
     )
 
+    #
     # update command
+    #
 
     sp_update = subparsers.add_parser(
         name='update',
@@ -130,23 +162,25 @@ def build_cli_parser():
         '-d',
         '--domain',
         help='The TLD (top-level domain) to update the A record for.' +
-             'Note: this field is case-sensitive. It must be entered exactly' +
-             'as it appears in your Namecheap account.',
+             ' Note: this field is case-sensitive. It must be entered exactly' +
+             ' as it appears in your Namecheap account.',
         required=True,
-        type=str
+        type=str,
+        metavar='domain'
     )
 
     sp_update.add_argument(
         '-p',
         '--password',
-        help='Your Namecheap DDNS password. This is NOT the same as your' +
-             ' Namecheap account password!' +
+        help='Your Namecheap DDNS password. This is *not* the same as your' +
+             ' Namecheap account password.' +
              '' +
-             ' Locating your DDNS password: "Domain List" -> (your domain) ->' +
-             ' "Manage", -> "Domain" drop-down -> "Advanced DNS"' +
-             ' Scroll down to the section labeled "Dynamic DNS."',
+             ' Locating your DDNS password: \'Domain List\' -> (your domain) ->' +
+             ' \'Manage\', -> \'Domain\' drop-down -> \'Advanced DNS\'' +
+             ' Scroll down to the section labeled \'Dynamic DNS.\'',
         required=True,
-        type=str
+        type=str,
+        metavar='pw'
     )
 
     sp_update.add_argument(
@@ -159,10 +193,39 @@ def build_cli_parser():
              ' address.',
         required=False,
         type=str,
-        default=None
-    )    
+        default=None,
+        metavar='addr'
+    )
 
+    rt_group = sp_update.add_mutually_exclusive_group()
+
+    rt_group.add_argument(
+        '-r',
+        '--retry',
+        help='Retry failed network transactions when circumstances allow.' +
+             ' This is the default setting. If you do not supply this flag with' + 
+             ' a number (or use `-nr/--no-retry`), retries will be performed' +
+             ' indefinitely until the transaction succceeds, or a non-retryable'
+             ' error is encountered. An exponential backoff algorithm is used to' +
+             ' calculate the interval between retries. For further information' +
+             ' , see `--docs`.',
+        required=False,
+        type=int,
+        default=INFINITY,
+        nargs=1,
+        metavar='num'
+    )
+
+    rt_group.add_argument(
+        '-nr',
+        '--no-retry',
+        help="Do not retry failed network transactions, but instead exit with an error.",
+        action='store_true',
+    )
+
+    #
     # resolve command
+    #
 
     sp_resolve = subparsers.add_parser(
         name='resolve',
@@ -180,6 +243,31 @@ def build_cli_parser():
         required=False,             
         type=str,
         default=None
+    )
+
+    sp_docs = subparsers.add_parser(
+        name='docs',
+        help='Obtain more information about this script, how to use it, and you' +
+             ' can expect it to behave.'
+    )
+
+    docs_group = sp_docs.add_mutually_exclusive_group()
+
+    docs_group.add_argument(
+        '-o',
+        '--online',
+        help='Opens the online documentation in your default web browser.',
+        action='store_true',
+        default=True
+    )
+
+    docs_group.add_argument(
+        '-p',
+        '--print',
+        help='Print unformatted, limited documentation in the terminal instead' +
+             ' of opening the online documentation (`-o/--online`).',
+        action='store_true',
+        default=False
     )
 
     return argparser
@@ -276,8 +364,7 @@ def parse_xml_response(xml_data: str):
                 else:
                     all_succeeded = False
             if all_succeeded:
-                logging.info("Successfully updated A record with IP: %s",
-                             ansi_esc_bold(final_result));
+                logging.info(ansi_esc_success(f"Successfully updated A record with IP: {final_result}"));
             return all_succeeded
         else: # all done; print final list of errors and return.
             logging.error("Failed to update A record! Found these error(s) in"
@@ -319,11 +406,11 @@ def do_resolve_request(arg_ns: argparse.Namespace):
             ip_v4_pattern = r'^[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}$'
             m = re.fullmatch(ip_v4_pattern, req.text, re.A)
             if m:
-                logging.info("Success! Your public IP address is: %s" % ansi_esc_bold(req.text))
+                logging.info(ansi_esc_success(f"Success! Your public IP address is: {req.text}"))
                 return True
             else:
                 logging.error(req.text);
-                logging.error("The response body from %s isn't an IPv4 address!" % svc)
+                logging.error(ansi_esc_error("The response from {svc} isn't an IPv4 address!"))
                 return False
         except re.error as rex:
             logging.error("regex exception: %s" % rex)
@@ -334,14 +421,13 @@ if __name__ == "__main__":
     argparser = build_cli_parser()
     arg_ns = argparser.parse_args()
 
-    if arg_ns.debug:
-        level = logging.DEBUG
-    else:
-        level = logging.INFO
+    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
+                        level=logging.DEBUG if arg_ns.debug else logging.INFO)
 
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=level)
-    logging.debug("argparse NS: %s" % arg_ns)
-    logging.info("Logging initialized with level: %s" % logging.getLevelName(level))
+    if arg_ns.debug:
+        logging.debug("Debug logging enabled.")
+        logging.debug("argparse NS: %s" % arg_ns)
+
     logging.info("Executing command: '%s'..." % arg_ns.command)
 
     if arg_ns.command == 'resolve':
