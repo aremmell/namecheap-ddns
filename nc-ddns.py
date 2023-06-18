@@ -1,5 +1,4 @@
-#!
-# @file nc-ddns.py
+## @file nc-ddns.py
 # @brief Namecheap Dyanmic DNS utilities
 #
 # Namecheap offers a great DDNS service, but the software (and router integration)
@@ -48,63 +47,79 @@ import os
 
 #============================== Constants =====================================#
 
-# The default timeouts for an HTTP GET request, in seconds (connect, read).
+## The default timeouts for an HTTP GET request, in seconds (connect, read).
 HTTP_TIMEOUTS = (6.05, 27.05)
 
-# The maximim number of times to retry a failed HTTP request.
+## The maximim number of times to retry a failed HTTP request.
 MAX_RETRIES = 15
 
-# The maximum HTTP redirects to tolerate.
+## The maximum HTTP redirects to tolerate.
 MAX_REDIRECTS = 3
 
-# The factor used to determine the next exponential backoff interval.
+## The factor used to determine the next exponential backoff interval.
 BACKOFF_FACTOR = 1.5
 
-# The amount of jitter to apply to the backoff interval.
+##The amount of jitter to apply to the backoff interval.
 BACKOFF_JITTER = 0.325
 
-# The longest possible retry backoff interval, in seconds.
+## The longest possible retry backoff interval, in seconds.
 MAX_BACKOFF = (5.0 * 60.0)
 
-# Namecheap DDNS API endpoint
+## Namecheap DDNS API endpoint
 NC_DDNS_URL = 'https://dynamicdns.park-your-domain.com/update'
 
-# The GitHub repository that this script was born in.
+## The GitHub repository that this script was born in.
 NC_DDNS_GH_REPO = 'https://github.com/aremmell/namecheap-ddns'
 
-# The link directly to README.md
+## The link directly to README.md
 NC_DDNS_GH_README = f'{NC_DDNS_GH_REPO}/blob/main/README.md'
 
-# The link directly to opening a new issue.
+## The link directly to opening a new issue.
 NC_DDNS_GH_NEWISSUE = f'{NC_DDNS_GH_REPO}/issues/new/choose'
 
-# The default service for resolution of public IP addresses.
+## The default service for resolution of public IP addresses.
+# @note This isn't necessary to update your address with Namecheap;
+# it is simply provided as a convenience.
 IP_SERVICE = 'https://api.ipify.org'
 
-# Whether or not to print the response body from Namecheap's server
+## Whether or not to print the response body from Namecheap's server
 # in the debug log. Disabled by default. Change this to 1 to enable.
 PRINT_XML_RESPONSE_BODY = 0
 
 #========================= Terminal syling ====================================#
 
-# base ANSI escape code generation
+## Creates an ANSI escape sequence using the information supplied.
+# @param codes A sequence of command characters that terminals interpret in
+# order to manipulate the apppearance of terminal output.
+# @remark For example, the string `1;31;49` represents bold text with red as
+# the foreground color.
 def ansi_esc(codes: str) -> str:
     return f'\x1b[{codes}m'
 
-# ansi escape reset
+## Ends an ANSI escape sequence and resets all styles and colors to normal.
 def ansi_esc_end() -> str:
     return ansi_esc('0')
 
-# ansi escape: basic 4-bit bold/dim, foreground, background
+## Generates a string wrapped in the begin/end sequences necessary to render
+# 16-color styling in the terminal.
+# @param msg The string to colorize/style.
+# @param attr 0=normal, 1=bold, 2=dim text
+# @param fg Foreground text color. The default value is the terminal's default.
+# @param bg Background text color. The default value is the terminal's default.
 def ansi_esc_basic(msg: str, attr: int = 0, fg: int = 39, bg: int = 49) -> str:
     return f'{ansi_esc(f"{str(attr)};{str(fg)};{str(bg)}")}{msg}{ansi_esc_end()}'
 
+## Generates a string that is red and bold in appearance for displaying errors.
 def error_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 31)
 
+## Generates a string that is green and bold in appearance for displaying
+# success messages.
 def success_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 32)
 
+## Generates a string that is yellow and bold in appearance for displaying
+# warnings.
 def warning_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 33)
 
@@ -220,7 +235,7 @@ class HttpRetryError:
             retval += ' – ' #emdash, not hyphen
 
         retval += self._retry.to_str(self._response)
-        
+
         return retval
 
 def http_retry_callback(
