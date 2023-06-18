@@ -35,9 +35,10 @@ __script_name__ = "nc-ddns-update.py"
 
 import sys
 import requests
+from requests.adapters import HTTPAdapter, Retry
+from urllib3 import exceptions
 import argparse
 import webbrowser
-import threading
 import logging
 import re
 import typing
@@ -51,11 +52,23 @@ IP_SERVICE = "https://api.ipify.org/"
 # The default timeouts for an HTTP GET request, in seconds (connect, read).
 HTTP_TIMEOUTS = (9.05, 27.05)
 
-# A number that represents infinity.
-INFINITY = -1
+# The maximim number of times to retry a failed HTTP request.
+MAX_RETRIES = 20
+
+# The maximum HTTP redirects to tolerate.
+MAX_REDIRECTS = 3
+
+# The factor used to determine the next exponential backoff interval.
+BACKOFF_FACTOR = 1.0
+
+# The amount of jitter to apply to the backoff interval.
+BACKOFF_JITTER = 0.325
+
+# The longest possible retry backoff interval, in seconds.
+MAX_BACKOFF = (5.0 * 60.0)
 
 # Namecheap DDNS API endpoint
-NC_DDNS_URL = "https://dynamicdns.park-your-domain.com/update"
+NC_DDNS_URL = "https://httpstat.us/502" #"https://dynamicdns.park-your-domain.com/update"
 
 # The GitHub repository that this script was born in.
 NC_DDNS_GH_REPO = "https://github.com/aremmell/namecheap-ddns"
@@ -84,74 +97,61 @@ def warning_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 33)
 
 #=============================== Network ======================================#
+class NcDdnsRetry(Retry):
+    def __init__(self, *args: tuple[typing.Any, typing.Any], **kwargs: dict[str, typing.Any]):
+        self._callback = kwargs.pop('callback', None)
+        super(NcDdnsRetry, self).__init__(*args, **kwargs)
+    def new(self, **kw: typing.Any):
+        kw['callback'] = self._callback
+        return super(NcDdnsRetry, self).new(**kw)
+    def increment(self, method, url, *args,**kwargs):
+        if self._callback:
+            try:
+                logging.info(f"args: '{args}', kwargs: '{kwargs}'")
+                self._callback(self, kwargs['response'])
+            except Exception:
+                logging.exception('Callback raised an exception; ignoring.')
+        return super(NcDdnsRetry, self).increment(method, url, *args, **kwargs)
 
-class RetryPolicy:
-    MIN_BACKOFF: int = 5
-    MAX_BACKOFF: int = (60 * 10)
-    last_rt_interval: int = 0
-    last_rt_count: int = 0
+def http_retry_callback(retry: NcDdnsRetry, response: requests.Response):
+    logging.info(f"retry: {retry}, response: {response}")
 
-    def __init__(self, arg_ns: argparse.Namespace) -> None:
-        self.ns = arg_ns
-
-    def retries_enabled(self) -> bool:
-        return False if self.ns.command.noretry else True
-    
-    def max_retries(self) -> int:
-        return 0 if self.ns.command.noretry else self.ns.command.retry.num
-    # ok there are at least 3 distinct ways in which the requests can fail:
-    # timeout;
-    # connection error;
-    # HTTP error code (e.g. 404, 500, etc.)
-    #
-    # for the first two, i think it's safe to reuse the same retry count
-    # and interval (maybe a longer interval for connection error, because
-    # it could indicate some local DNS resolution or general tubes issue).
-    #
-    # for HTTP error codes, there are only a couple we should retry:
-    #
-    # 429 (rate limiting) – back off and try later (Reply contains 'Retry-After' in seconds)
-    # 500 internal server error
-    # 502 bad gateway
-    # 503 service unavailable (also contains Retry-After)
-    # 504 gateway timeout
-    def handle_error(self, e: requests.exceptions.RequestException):
-        if e is requests.exceptions.Timeout:
-            pass
-
-class GetRequestThread(threading.Thread):
-    retry_policy: RetryPolicy | None = None
-    response: requests.Response | None = None
-
-    def __init__(self, arg_ns: argparse.Namespace, url: str,
-                 payload: dict[str, str] = dict(),
-                 headers: dict[str, str] = dict()) -> None:
-        self.retry_policy = RetryPolicy(arg_ns)
-        self.url = url
-        self.payload = payload
-        self.headers = headers
-        super().__init__(None, None, "get_request", [], None)
-
-    def run(self) -> None:
-        self.response = do_http_get_request(self.url, self.payload,
-                                            self.headers, self.retry_policy)
-
-# performs an HTTP GET request
 def do_http_get_request(url: str, payload: dict[str, str] = dict(),
                 headers: dict[str, str] = dict(),
-                retry_pol: RetryPolicy | None = None) -> requests.Response | None:
+                max_retries: int = MAX_RETRIES) -> requests.Response | None:
     try:
+        session = requests.Session()
+        retries = NcDdnsRetry(
+            total=max_retries,
+            connect=max_retries,
+            read=max_retries,
+            redirect=MAX_REDIRECTS,
+            status=max_retries,
+            other=max_retries,
+            backoff_factor=BACKOFF_FACTOR,
+            backoff_jitter=BACKOFF_JITTER,
+            backoff_max=MAX_BACKOFF,
+            raise_on_redirect=True,
+            respect_retry_after_header=True,
+            status_forcelist=frozenset({413, 429, 502, 503, 504}),
+            callback=http_retry_callback
+        )
+
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+
         headers['User-Agent'] = '{__script_name__}/{__version__}' 
+
         logging.debug(f'Performing GET request to \'{url}\' with params:' +
-                       ' \'{payload}\', headers: \'{headers}\'," and timeouts' +
-                       ' (conn, read): {HTTP_TIMEOUTS}...')
+                       ' \'{payload}\', headers: \'{headers}\', timeouts' +
+                       ' (conn, read): {HTTP_TIMEOUTS}, max retries: ' +
+                       ' {max_retries}, max redirects: {MAX_REDIRECTS}...')
         
         t_start = time.perf_counter_ns()
-        r = requests.get(
+        r = session.get(
             url,
             params=payload,
             headers=headers,
-            timeout=HTTP_TIMEOUTS
+            timeout=HTTP_TIMEOUTS,
         )
         t_end = time.perf_counter_ns()
 
@@ -162,6 +162,8 @@ def do_http_get_request(url: str, payload: dict[str, str] = dict(),
                            % ((t_end - t_start) / 1e9))
         return r
 
+    except exceptions.MaxRetryError as e:
+        logging.error("All retry attempts failed; giving up. error: %s" % e)
     except requests.exceptions.ConnectionError as e:
         logging.error("Failed to connect to server: %s" % e)
         return None
@@ -358,16 +360,15 @@ def build_cli_parser():
     rt_group.add_argument(
         '-r',
         '--retry',
-        help='Retry failed network transactions when circumstances allow.' +
-             ' This is the default setting. If you do not supply this flag with' + 
-             ' a number (or use `-nr/--no-retry`), retries will be performed' +
-             ' indefinitely until the transaction succceeds, or a non-retryable'
-             ' error is encountered. An exponential backoff algorithm is used to' +
-             ' calculate the interval between retries. For further information' +
-             ' , see `--docs`.',
+        help=f'Retry failed network transactions when circumstances allow.' +
+             ' This is the default setting. Retries will be performed' +
+             ' {MAX_RETRIES} times, or until a non-retryable error is' +
+             ' encountered. An exponential backoff algorithm is used to' +
+             ' calculate the interval between retries. For further'
+             ' information, see `--docs`.',
         required=False,
         type=int,
-        default=INFINITY,
+        default=MAX_RETRIES,
         nargs=1,
         metavar='num'
     )
@@ -396,8 +397,8 @@ def build_cli_parser():
              ' the IPv4 address. Currently, that is the only response supported.',
         required=False,             
         type=str,
-        default=None
-        metavar=url
+        default=None,
+        metavar='url'
     )
 
     # docs command
@@ -434,14 +435,8 @@ def do_update_request(arg_ns: argparse.Namespace):
     if (arg_ns.ip is not None):
         payload['ip'] = arg_ns.ip
 
-    logging.debug("Spawning GetRequestThread...")
-    thrd = GetRequestThread(NC_DDNS_URL, payload, arg_ns)
-    thrd.start()
-    logging.debug("Started thread; waiting on join...")
-    thrd.join()
-    logging.debug("Thread joined.")
-
-    response: requests.Response | None = thrd.response
+    max_retries = arg_ns.retry if not arg_ns.no_retry else 0
+    response = do_http_get_request(NC_DDNS_URL, payload, dict(), max_retries)
     if response is None:
         logging.error("Failed to update A record!")
         return False
@@ -450,24 +445,20 @@ def do_update_request(arg_ns: argparse.Namespace):
 
 # entry point for the 'resolve' command
 def do_resolve_request(arg_ns: argparse.Namespace):
-    if arg_ns.service is not None:
-        svc = arg_ns.service
-    else:
-        svc = IP_SERVICE
-    
-    req = do_http_get_request(svc)
-    if req is None:
+    svc = IP_SERVICE if arg_ns.serive is None else arg_ns.service
+    response = do_http_get_request(svc)
+    if response is None:
         logging.error("Failed to resolve your public IP address!")
         return False
     else:
         try:
             ip_v4_pattern = r'^[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}$'
-            m = re.fullmatch(ip_v4_pattern, req.text, re.A)
+            m = re.fullmatch(ip_v4_pattern, response.text, re.A)
             if m:
-                logging.info(success_msg(f"Success! Your public IP address is: {req.text}"))
+                logging.info(success_msg(f"Success! Your public IP address is: {response.text}"))
                 return True
             else:
-                logging.error(req.text);
+                logging.error(response.text);
                 logging.error(error_msg("The response from {svc} isn't an IPv4 address!"))
                 return False
         except re.error as rex:
