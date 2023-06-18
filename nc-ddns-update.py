@@ -33,24 +33,22 @@
 __version__ = "0.1.1b"
 __script_name__ = "nc-ddns-update.py"
 
-import sys
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from urllib3 import exceptions
+from urllib3 import HTTPResponse, exceptions
 import argparse
 import webbrowser
 import logging
 import re
 import typing
+import inspect
 import time
+import os
 
-# The default service for resolution of public IP addresses.
-# There is a command-line option to override it, but unless it's
-# not working, I wouldn't recommend changing it.
-IP_SERVICE = "https://api.ipify.org/"
+#============================== Constants =====================================#
 
 # The default timeouts for an HTTP GET request, in seconds (connect, read).
-HTTP_TIMEOUTS = (9.05, 27.05)
+HTTP_TIMEOUTS = (6.05, 27.05)
 
 # The maximim number of times to retry a failed HTTP request.
 MAX_RETRIES = 20
@@ -59,7 +57,7 @@ MAX_RETRIES = 20
 MAX_REDIRECTS = 3
 
 # The factor used to determine the next exponential backoff interval.
-BACKOFF_FACTOR = 1.0
+BACKOFF_FACTOR = 0.5
 
 # The amount of jitter to apply to the backoff interval.
 BACKOFF_JITTER = 0.325
@@ -68,12 +66,22 @@ BACKOFF_JITTER = 0.325
 MAX_BACKOFF = (5.0 * 60.0)
 
 # Namecheap DDNS API endpoint
-NC_DDNS_URL = "https://httpstat.us/502" #"https://dynamicdns.park-your-domain.com/update"
+NC_DDNS_URL = 'https://httpstat.us/429' #'https://dynamicdns.park-your-domain.com/update'
 
 # The GitHub repository that this script was born in.
-NC_DDNS_GH_REPO = "https://github.com/aremmell/namecheap-ddns"
+NC_DDNS_GH_REPO = 'https://github.com/aremmell/namecheap-ddns'
 
-#========================= Terminal colors ====================================#
+# The link directly to README.md
+NC_DDNS_GH_README = f'{NC_DDNS_GH_REPO}/blob/main/README.md'
+
+# The default service for resolution of public IP addresses.
+IP_SERVICE = 'https://api.ipify.org'
+
+# Whether or not to print the response body from Namecheap's server
+# in the debug log. Disabled by default. Change this to 1 to enable.
+PRINT_XML_RESPONSE_BODY = 0
+
+#========================= Terminal syling ====================================#
 
 # base ANSI escape code generation
 def ansi_esc(codes: str) -> str:
@@ -96,56 +104,112 @@ def success_msg(msg: str) -> str:
 def warning_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 33)
 
+#========================== Exception handling ================================#
+
+# returns information about the frame before itself; so whatever function calls
+# get_tb() will have its information recorded for printing to the log.
+def get_tb() -> inspect.Traceback | None:
+    outer_frames = inspect.getouterframes(inspect.currentframe())
+    if not outer_frames or len(outer_frames) < 2:
+        return None
+    else:
+        return inspect.getframeinfo(outer_frames[1].frame)
+
+def tb_to_str(tb: inspect.Traceback | None) -> str:
+    if not tb:
+        return "<???>"
+    else:
+        return f'{tb.function} in {os.path.basename(tb.filename)}:{tb.lineno}'
+
+def on_critical_exception(e: Exception, tb: inspect.Traceback | None):
+    logging.exception(error_msg(f'{tb_to_str(tb)}: {e}'))
+
 #=============================== Network ======================================#
+
+# Allows for interception of transaction failures (retries), so that they
+# may be logged as warnings.
 class NcDdnsRetry(Retry):
-    def __init__(self, *args: tuple[typing.Any, typing.Any], **kwargs: dict[str, typing.Any]):
+    def __init__(self, *args, **kwargs):
         self._callback = kwargs.pop('callback', None)
-        super(NcDdnsRetry, self).__init__(*args, **kwargs)
+        super(NcDdnsRetry, self).__init__(**kwargs)
+
     def new(self, **kw: typing.Any):
         kw['callback'] = self._callback
         return super(NcDdnsRetry, self).new(**kw)
+
     def increment(self, method, url, *args,**kwargs):
-        if self._callback:
-            try:
-                logging.info(f"args: '{args}', kwargs: '{kwargs}'")
-                self._callback(self, kwargs['response'])
-            except Exception:
-                logging.exception('Callback raised an exception; ignoring.')
+        try:
+            if self._callback:
+                self._callback(
+                    self,
+                    kwargs.get('response', None),
+                    kwargs.get('error', None)
+                )
+        except Exception:
+            # this exception is not important enough for the critical handler.
+            logging.exception('Retry callback raised an exception; ignoring.')
+
+        logging.debug(f'{method}, {url}, {args}, {kwargs}')
         return super(NcDdnsRetry, self).increment(method, url, *args, **kwargs)
 
-def http_retry_callback(retry: NcDdnsRetry, response: requests.Response):
-    logging.info(f"retry: {retry}, response: {response}")
+def http_retry_callback(
+        retry: NcDdnsRetry,
+        response: HTTPResponse,
+        err: Exception | None
+    ):
+    # err and response are not always set.
+    if err:
+        logging.warning(f'err: {err.args}')
+    else:
+        logging.warning("got no err")
+    
+    if response:
+        logging.warning(f'response: url= {response.geturl()}, status:{response.status}')
+        logging.warning(f'response: reason: {response.reason}')
+        logging.warning(f'retry retry-after: {retry.get_retry_after(response)}')
+    else:
+        logging.warning("got no response")
 
-def do_http_get_request(url: str, payload: dict[str, str] = dict(),
-                headers: dict[str, str] = dict(),
-                max_retries: int = MAX_RETRIES) -> requests.Response | None:
+        logging.warning(f'retry retry total {retry.total}, conn: {retry.connect}, read: {retry.read}, stat: {retry.status}')
+        logging.warning(f'backoff: {retry.get_backoff_time()}')
+
+def do_http_get_request(
+        url: str,
+        payload: dict[str, str] = dict(),
+        headers: dict[str, str] = dict(),
+        max_num_retries: int = MAX_RETRIES
+    ) -> requests.Response | None:
     try:
+        headers['User-Agent'] = f'{__script_name__}/{__version__}'
+
         session = requests.Session()
         retries = NcDdnsRetry(
-            total=max_retries,
-            connect=max_retries,
-            read=max_retries,
+            total=max_num_retries,
+            connect=max_num_retries,
+            read=max_num_retries,
             redirect=MAX_REDIRECTS,
-            status=max_retries,
-            other=max_retries,
+            status=max_num_retries,
+            other=max_num_retries,
             backoff_factor=BACKOFF_FACTOR,
             backoff_jitter=BACKOFF_JITTER,
             backoff_max=MAX_BACKOFF,
             raise_on_redirect=True,
             respect_retry_after_header=True,
-            status_forcelist=frozenset({413, 429, 502, 503, 504}),
+            status_forcelist=frozenset({408, 413, 429, 502, 503, 504}),
             callback=http_retry_callback
         )
 
         session.mount('https://', HTTPAdapter(max_retries=retries))
+        session.mount('http://', HTTPAdapter(max_retries=retries))        
 
-        headers['User-Agent'] = '{__script_name__}/{__version__}' 
+        logging.debug(
+            f'Performing GET request to \'{url}\' with params:' +
+            f' \'{payload}\', headers: \'{headers}\', timeouts' +
+            f' (conn, read): {HTTP_TIMEOUTS}, max retries:' +
+            f' {max_num_retries}, max redirs: {MAX_REDIRECTS}...'
+        )
 
-        logging.debug(f'Performing GET request to \'{url}\' with params:' +
-                       ' \'{payload}\', headers: \'{headers}\', timeouts' +
-                       ' (conn, read): {HTTP_TIMEOUTS}, max retries: ' +
-                       ' {max_retries}, max redirects: {MAX_REDIRECTS}...')
-        
+        # this is the meat–between these counter start and end calls.
         t_start = time.perf_counter_ns()
         r = session.get(
             url,
@@ -158,29 +222,23 @@ def do_http_get_request(url: str, payload: dict[str, str] = dict(),
         if r.status_code != requests.codes.ok:
             r.raise_for_status()
         else:
-            logging.debug('Request successful (%.02fsec)'
-                           % ((t_end - t_start) / 1e9))
+            logging.debug(
+                'Request successful (%.04fsec)' % ((t_end - t_start) / 1e9)
+            )
         return r
 
-    except exceptions.MaxRetryError as e:
-        logging.error("All retry attempts failed; giving up. error: %s" % e)
-    except requests.exceptions.ConnectionError as e:
-        logging.error("Failed to connect to server: %s" % e)
-        return None
-    except requests.exceptions.HTTPError as e:
-        logging.error("Server returned an HTTP error code: %s" % e)
-        return None
-    except requests.exceptions.Timeout as e:
-        logging.error("Request timed out: %s" % e)
-        return None
     except requests.exceptions.RequestException as e:
-        logging.error("Caught HTTP exception: %s" % e)
+        # all attempts have failed (or retries were disabled), or an HTTP error
+        # code was returned that is not in the retry list (e.g. 500).
+        on_critical_exception(e, get_tb())
         return None
-    
+
 #========================== Response parser ===================================#    
 
 def parse_xml_response(xml_data: str):
-    logging.debug("XML response body:\n%s\n" % xml_data)
+    if PRINT_XML_RESPONSE_BODY != 0:
+        logging.debug("XML response body:\n%s\n" % xml_data)
+
     logging.debug("Using regex to parse XML...")
 
     def search_xml(pattern: str, flags: re.RegexFlag) -> re.Match[str] | None:
@@ -230,7 +288,7 @@ def parse_xml_response(xml_data: str):
         if m1: # got a match; error count = group 1
             n_err = int(m1.group(1))
             if n_err > 0: # extract the error message(s) from the second pattern.
-                logging.debug(f"errors: {n_err}; looking for error messages...")                
+                logging.debug(f'errors: {n_err}; looking for error messages...')                
                 m2 = findall_xml(err_patterns[1], re_flags)
                 if m2:
                     for i in range(len(m2)):
@@ -270,7 +328,7 @@ def parse_xml_response(xml_data: str):
             if all_succeeded:
                 logging.info(
                     success_msg(
-                        f"Successfully updated A record with IP: {final_result}"
+                        f'Successfully updated A record with IP: {final_result}'
                     )
                 );
             return all_succeeded
@@ -293,7 +351,7 @@ def build_cli_parser():
         prog='nc-ddns-update.py',
         description='Namecheap Dynamic DNS utilities.',
         epilog=f'For updates, filing bug reports, making feature requests,' +
-                ' etc., visit {NC_DDNS_GH_REPO}.'
+               f' etc., visit {NC_DDNS_GH_REPO}.'
     )
 
     argparser.add_argument(
@@ -357,19 +415,26 @@ def build_cli_parser():
 
     rt_group = sp_update.add_mutually_exclusive_group()
 
+    class IntGreaterThanZeroAction(argparse.Action):
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            if not values > 0:
+                parser.error(f'{option_string} must be greater than zero.')
+
+            setattr(namespace, self.dest, values)
+
     rt_group.add_argument(
         '-r',
         '--retry',
-        help=f'Retry failed network transactions when circumstances allow.' +
+        help='Retry failed network transactions when circumstances allow.' +
              ' This is the default setting. Retries will be performed' +
-             ' {MAX_RETRIES} times, or until a non-retryable error is' +
+            f' {MAX_RETRIES} times, or until a non-retryable error is' +
              ' encountered. An exponential backoff algorithm is used to' +
              ' calculate the interval between retries. For further'
              ' information, see `--docs`.',
-        required=False,
+        action=IntGreaterThanZeroAction,
         type=int,
         default=MAX_RETRIES,
-        nargs=1,
         metavar='num'
     )
 
@@ -391,8 +456,8 @@ def build_cli_parser():
     sp_resolve.add_argument(
         '-s',
         '--service',
-        help=f'If specified, override the third-party service used to resolve' +
-             ' your public IP address. (default: {IP_SERVICE}})'
+        help='If specified, override the third-party service used to resolve' +
+            f' your public IP address. (default: {IP_SERVICE})'
              ' Note: the service must return a plaintext response containing only' +
              ' the IPv4 address. Currently, that is the only response supported.',
         required=False,             
@@ -422,8 +487,7 @@ def build_cli_parser():
     docs_group.add_argument(
         '-p',
         '--print',
-        help='Print unformatted, limited documentation in the terminal instead' +
-             ' of opening the online documentation (`-o/--online`).',
+        help='Print unformatted, limited documentation in the terminal.',
         action='store_true'
     )
 
@@ -438,31 +502,39 @@ def do_update_request(arg_ns: argparse.Namespace):
     max_retries = arg_ns.retry if not arg_ns.no_retry else 0
     response = do_http_get_request(NC_DDNS_URL, payload, dict(), max_retries)
     if response is None:
-        logging.error("Failed to update A record!")
+        logging.error(error_msg('Failed to update A record!'))
         return False
     else:
         return parse_xml_response(response.text)
 
 # entry point for the 'resolve' command
 def do_resolve_request(arg_ns: argparse.Namespace):
-    svc = IP_SERVICE if arg_ns.serive is None else arg_ns.service
+    svc = IP_SERVICE if arg_ns.service is None else arg_ns.service
     response = do_http_get_request(svc)
     if response is None:
-        logging.error("Failed to resolve your public IP address!")
+        logging.error(error_msg('Failed to resolve your public IP address!'))
         return False
     else:
         try:
             ip_v4_pattern = r'^[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}$'
             m = re.fullmatch(ip_v4_pattern, response.text, re.A)
             if m:
-                logging.info(success_msg(f"Success! Your public IP address is: {response.text}"))
+                logging.info(
+                    success_msg(
+                        f'Success! Your public IP address is: {response.text}'
+                    )
+                )
                 return True
             else:
                 logging.error(response.text);
-                logging.error(error_msg("The response from {svc} isn't an IPv4 address!"))
+                logging.error(
+                    error_msg(
+                        f'The response from {svc} isn\'t an IPv4 address!'
+                    )
+                )
                 return False
-        except re.error as rex:
-            logging.error("regex exception: %s" % rex)
+        except re.error as e:
+            on_critical_exception(e, get_tb())
             return False
 
 # entry point for the 'docs' command
@@ -471,33 +543,38 @@ def do_display_docs(arg_ns: argparse.Namespace) -> bool:
         print("TODO: print limited documentation here; perhaps from an online file.")
         return True
     elif arg_ns.online:
-        return webbrowser.open(NC_DDNS_GH_REPO)
+        return webbrowser.open(NC_DDNS_GH_README)
     else:
         return False
     
 # script entry point
 if __name__ == "__main__":
-    argparser = build_cli_parser()
-    arg_ns = argparser.parse_args()
+    try:
+        argparser = build_cli_parser()
+        arg_ns = argparser.parse_args()
 
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-                        level=logging.DEBUG if arg_ns.debug else logging.INFO)
+        logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
+                            level=logging.DEBUG if arg_ns.debug else logging.INFO)
 
-    if arg_ns.debug:
-        logging.debug("Debug logging enabled.")
-        logging.debug("argparse NS: %s" % arg_ns)
+        if arg_ns.debug:
+            logging.debug("Debug logging enabled.")
+            logging.debug("argparse NS: %s" % arg_ns)
 
-    logging.info("Executing command: '%s'..." % arg_ns.command)
+        logging.info("Executing command: '%s'..." % arg_ns.command)
 
-    if arg_ns.command == 'resolve':
-        exit_code = 0 if do_resolve_request(arg_ns) else 1
-    elif arg_ns.command == 'update':
-        exit_code = 0 if do_update_request(arg_ns) else 1
-    elif arg_ns.command == 'docs':
-        exit_code = 0 if do_display_docs(arg_ns) else 1
-    else:
-        logging.error("Unknown command: %s" % arg_ns.command)
+        if arg_ns.command == 'resolve':
+            exit_code = 0 if do_resolve_request(arg_ns) else 1
+        elif arg_ns.command == 'update':
+            exit_code = 0 if do_update_request(arg_ns) else 1
+        elif arg_ns.command == 'docs':
+            exit_code = 0 if do_display_docs(arg_ns) else 1
+        else:
+            logging.error("Unknown command: %s" % arg_ns.command)
+            exit_code = 1        
+    except Exception as e:
+        logging.critical("Exception in __main__: %s" % e)
+        assert()
         exit_code = 1
 
     logging.debug("Exiting with code: %d" % exit_code)
-    sys.exit(exit_code)
+    exit(exit_code)
