@@ -1,5 +1,5 @@
 #!
-# @file nc-ddns-update.py
+# @file nc-ddns.py
 # @brief Namecheap Dyanmic DNS utilities
 #
 # Namecheap offers a great DDNS service, but the software (and router integration)
@@ -30,12 +30,13 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 
-__version__ = "0.1.1b"
-__script_name__ = "nc-ddns-update.py"
+__version__ = "0.1.2"
+__script_name__ = "nc-ddns.py"
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from urllib3 import HTTPResponse, exceptions
+from urllib3 import HTTPResponse
+from urllib3.response import BaseHTTPResponse
 import argparse
 import webbrowser
 import logging
@@ -51,13 +52,13 @@ import os
 HTTP_TIMEOUTS = (6.05, 27.05)
 
 # The maximim number of times to retry a failed HTTP request.
-MAX_RETRIES = 20
+MAX_RETRIES = 15
 
 # The maximum HTTP redirects to tolerate.
 MAX_REDIRECTS = 3
 
 # The factor used to determine the next exponential backoff interval.
-BACKOFF_FACTOR = 0.5
+BACKOFF_FACTOR = 1.5
 
 # The amount of jitter to apply to the backoff interval.
 BACKOFF_JITTER = 0.325
@@ -66,13 +67,16 @@ BACKOFF_JITTER = 0.325
 MAX_BACKOFF = (5.0 * 60.0)
 
 # Namecheap DDNS API endpoint
-NC_DDNS_URL = 'https://httpstat.us/429' #'https://dynamicdns.park-your-domain.com/update'
+NC_DDNS_URL = 'https://dynamicdns.park-your-domain.com/update'
 
 # The GitHub repository that this script was born in.
 NC_DDNS_GH_REPO = 'https://github.com/aremmell/namecheap-ddns'
 
 # The link directly to README.md
 NC_DDNS_GH_README = f'{NC_DDNS_GH_REPO}/blob/main/README.md'
+
+# The link directly to opening a new issue.
+NC_DDNS_GH_NEWISSUE = f'{NC_DDNS_GH_REPO}/issues/new/choose'
 
 # The default service for resolution of public IP addresses.
 IP_SERVICE = 'https://api.ipify.org'
@@ -122,20 +126,39 @@ def tb_to_str(tb: inspect.Traceback | None) -> str:
         return f'{tb.function} in {os.path.basename(tb.filename)}:{tb.lineno}'
 
 def on_critical_exception(e: Exception, tb: inspect.Traceback | None):
-    logging.exception(error_msg(f'{tb_to_str(tb)}: {e}'))
+    logging.exception(
+        error_msg(
+            f'{tb_to_str(tb)}: {str(e)}; if you believe' + \
+             ' you have found a bug, please take a moment' + \
+            f' to open an issue on GitHub: {NC_DDNS_GH_NEWISSUE}'
+        )
+    )
 
 #=============================== Network ======================================#
 
 # Allows for interception of transaction failures (retries), so that they
 # may be logged as warnings.
-class NcDdnsRetry(Retry):
+class NcDDNSRetry(Retry):
+    _callback: typing.Callable[[
+        Retry,
+        BaseHTTPResponse | None,
+        Exception | None
+    ], None] | None
+    total: int = 0
+
     def __init__(self, *args, **kwargs):
         self._callback = kwargs.pop('callback', None)
-        super(NcDdnsRetry, self).__init__(**kwargs)
+        self.total = kwargs.get('total', 0)
+        logging.debug(f'{type(self).__name__} instantiated at {id(self):x}')
+        super(NcDDNSRetry, self).__init__(**kwargs)
+
+    def __del__(self):
+        self._callback = None
+        logging.debug(f'{type(self).__name__} deallocating at {id(self):x}')
 
     def new(self, **kw: typing.Any):
         kw['callback'] = self._callback
-        return super(NcDdnsRetry, self).new(**kw)
+        return super(NcDDNSRetry, self).new(**kw)
 
     def increment(self, method, url, *args,**kwargs):
         try:
@@ -146,32 +169,67 @@ class NcDdnsRetry(Retry):
                     kwargs.get('error', None)
                 )
         except Exception:
-            # this exception is not important enough for the critical handler.
             logging.exception('Retry callback raised an exception; ignoring.')
+        return super(NcDDNSRetry, self).increment(method, url, *args, **kwargs)
 
-        logging.debug(f'{method}, {url}, {args}, {kwargs}')
-        return super(NcDdnsRetry, self).increment(method, url, *args, **kwargs)
+    def to_str(self, response: BaseHTTPResponse | None) -> str:
+        retry_str: str = ""
+        response_str: str = ""
+        retry_after: float | None = 0.0
+
+        if self.total and self.total > 0:
+            retry_str = f'{self.total}' + \
+                  f' {"retries" if self.total > 1 else "retry"} remaining; '
+
+        if response:
+            reason = response.reason if response.reason else "Unknown"
+            response_str = 'Encountered HTTP response (code:' + \
+            f' {response.status}, reason: {reason}) '
+            retry_after = super(NcDDNSRetry, self).get_retry_after(response)
+
+        backoff_time = super(NcDDNSRetry, self).get_backoff_time()
+        interval = retry_after if response and retry_after \
+              and retry_after > 0.0 else backoff_time
+
+        return '{0}{1}{2}'.format(
+            response_str,
+            retry_str,
+            'will retry again in {0:.03f}s...'.format(
+                interval
+            ) if retry_str != '' else 'will not be retrying; giving up.'
+        )
+
+class HttpRetryError:
+    _retry: NcDDNSRetry
+    _err: Exception
+    _response: HTTPResponse
+    
+    def __init__(self, *args, **kwargs):
+        self._retry = kwargs.get('retry', None)
+        self._err   = kwargs.get('err', None)
+        self._response = kwargs.get('response', None)
+    
+    def __str__(self) -> str:
+        retval: str = ''
+        if self._err:
+            m = re.search(r'^<(?:.*)>:\s(.*)$', str(self._err), re.A)
+            if m:
+                retval += m.group(1)
+            else:
+                retval += str(self._err)
+            retval += ' – ' #emdash, not hyphen
+
+        retval += self._retry.to_str(self._response)
+        
+        return retval
 
 def http_retry_callback(
-        retry: NcDdnsRetry,
-        response: HTTPResponse,
+        retry: NcDDNSRetry,
+        response: BaseHTTPResponse | None,
         err: Exception | None
     ):
-    # err and response are not always set.
-    if err:
-        logging.warning(f'err: {err.args}')
-    else:
-        logging.warning("got no err")
-    
-    if response:
-        logging.warning(f'response: url= {response.geturl()}, status:{response.status}')
-        logging.warning(f'response: reason: {response.reason}')
-        logging.warning(f'retry retry-after: {retry.get_retry_after(response)}')
-    else:
-        logging.warning("got no response")
-
-        logging.warning(f'retry retry total {retry.total}, conn: {retry.connect}, read: {retry.read}, stat: {retry.status}')
-        logging.warning(f'backoff: {retry.get_backoff_time()}')
+    err_obj = HttpRetryError(retry=retry, response=response, err=err)
+    logging.warning(warning_msg(str(err_obj)))
 
 def do_http_get_request(
         url: str,
@@ -183,7 +241,7 @@ def do_http_get_request(
         headers['User-Agent'] = f'{__script_name__}/{__version__}'
 
         session = requests.Session()
-        retries = NcDdnsRetry(
+        retries = NcDDNSRetry(
             total=max_num_retries,
             connect=max_num_retries,
             read=max_num_retries,
@@ -209,6 +267,10 @@ def do_http_get_request(
             f' {max_num_retries}, max redirs: {MAX_REDIRECTS}...'
         )
 
+        logging.info(
+            ansi_esc_basic(f'Beginning request to \'{url}\'...', 1)
+        )
+
         # this is the meat–between these counter start and end calls.
         t_start = time.perf_counter_ns()
         r = session.get(
@@ -222,8 +284,12 @@ def do_http_get_request(
         if r.status_code != requests.codes.ok:
             r.raise_for_status()
         else:
-            logging.debug(
-                'Request successful (%.04fsec)' % ((t_end - t_start) / 1e9)
+            logging.info(
+                ansi_esc_basic(
+                    'Request successful (%.03fsec); parsing response...' 
+                        % ((t_end - t_start) / 1e9),
+                    1
+                )
             )
         return r
 
@@ -235,7 +301,7 @@ def do_http_get_request(
 
 #========================== Response parser ===================================#    
 
-def parse_xml_response(xml_data: str):
+def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
     if PRINT_XML_RESPONSE_BODY != 0:
         logging.debug("XML response body:\n%s\n" % xml_data)
 
@@ -328,19 +394,24 @@ def parse_xml_response(xml_data: str):
             if all_succeeded:
                 logging.info(
                     success_msg(
-                        f'Successfully updated A record with IP: {final_result}'
+                        f'Successfully updated A record for {arg_ns.domain}' + 
+                        f' with IPv4 address: {final_result}'
                     )
                 );
             return all_succeeded
         else: # all done; print final list of errors and return.
-            logging.error("Failed to update A record! Found these error(s) in"
-                          " the response body:\n");
+            logging.error(
+                error_msg(
+                    f'Failed to update A record for {arg_ns.domain}!' +
+                    f' Found these error(s) in the response body:\n'
+                )
+            );
             for e in range(len(final_err_set)):
-                logging.error("\t%d: '%s'" % (e + 1, final_err_set[e]))
+                logging.error(error_msg(f'\t{e + 1}: \'{final_err_set[e]}\''))
 
             return False
     except re.error as e:
-        logging.error("regex exception: %s" % e)
+        on_critical_exception(e, get_tb())
         return False    
 
 #================================= CLI ========================================#    
@@ -356,8 +427,8 @@ def build_cli_parser():
 
     argparser.add_argument(
         '--debug',
-        help='Enables debug mode. Detailed diagnostic information will be' +
-             ' printed during the execution of this script.',
+        help='Enables printing of detailed diagnostic information' +
+             ' during the execution of this script.',
         action='store_true'
     )
 
@@ -368,9 +439,43 @@ def build_cli_parser():
         required=True
     )
 
+    command_shared = argparse.ArgumentParser(add_help=False)
+    mu_group = command_shared.add_mutually_exclusive_group()
+
+    class IntGreaterThanZeroAction(argparse.Action):
+        def __call__(self, parser, namespace, values: int, option_string=None):
+            if not values > 0:
+                parser.error(f'{option_string} must be greater than zero.')
+
+            setattr(namespace, self.dest, values)
+
+    mu_group.add_argument(
+        '-r',
+        '--retry',
+        help='Retry failed network transactions when circumstances allow.' +
+             ' This is the default setting. Retries will be performed' +
+            f' {MAX_RETRIES} times, or until a non-retryable error is' +
+             ' encountered. An exponential backoff algorithm is used to' +
+             ' calculate the interval between retries. For further'
+             ' information, see `--docs`.',
+        action=IntGreaterThanZeroAction,
+        type=int,
+        default=MAX_RETRIES,
+        metavar='num'
+    )
+
+    mu_group.add_argument(
+        '-n',
+        '--no-retry',
+        help='Do not retry failed network transactions, but instead exit with' +
+             ' an error.',
+        action='store_true',
+    )    
+
     # update command
     sp_update = subparsers.add_parser(
         name='update',
+        parents=[command_shared],
         help='Updates the A record for the specified Namecheap DDNS domain.'
     )
 
@@ -413,42 +518,10 @@ def build_cli_parser():
         metavar='addr'
     )
 
-    rt_group = sp_update.add_mutually_exclusive_group()
-
-    class IntGreaterThanZeroAction(argparse.Action):
-
-        def __call__(self, parser, namespace, values, option_string=None):
-            if not values > 0:
-                parser.error(f'{option_string} must be greater than zero.')
-
-            setattr(namespace, self.dest, values)
-
-    rt_group.add_argument(
-        '-r',
-        '--retry',
-        help='Retry failed network transactions when circumstances allow.' +
-             ' This is the default setting. Retries will be performed' +
-            f' {MAX_RETRIES} times, or until a non-retryable error is' +
-             ' encountered. An exponential backoff algorithm is used to' +
-             ' calculate the interval between retries. For further'
-             ' information, see `--docs`.',
-        action=IntGreaterThanZeroAction,
-        type=int,
-        default=MAX_RETRIES,
-        metavar='num'
-    )
-
-    rt_group.add_argument(
-        '-nr',
-        '--no-retry',
-        help='Do not retry failed network transactions, but instead exit with' +
-             ' an error.',
-        action='store_true',
-    )
-
     # resolve command
     sp_resolve = subparsers.add_parser(
         name='resolve',
+        parents=[command_shared],
         help='Resolves your public IP address using a third-party service' +
              ' and prints it to stdout.',
     )
@@ -505,14 +578,14 @@ def do_update_request(arg_ns: argparse.Namespace):
         logging.error(error_msg('Failed to update A record!'))
         return False
     else:
-        return parse_xml_response(response.text)
+        return parse_xml_response(response.text, arg_ns)
 
 # entry point for the 'resolve' command
 def do_resolve_request(arg_ns: argparse.Namespace):
     svc = IP_SERVICE if arg_ns.service is None else arg_ns.service
     response = do_http_get_request(svc)
     if response is None:
-        logging.error(error_msg('Failed to resolve your public IP address!'))
+        logging.error(error_msg('Failed to resolve your public IPv4 address!'))
         return False
     else:
         try:
@@ -521,7 +594,7 @@ def do_resolve_request(arg_ns: argparse.Namespace):
             if m:
                 logging.info(
                     success_msg(
-                        f'Success! Your public IP address is: {response.text}'
+                        f'Success! Your public IPv4 address is: {response.text}'
                     )
                 )
                 return True
@@ -572,8 +645,7 @@ if __name__ == "__main__":
             logging.error("Unknown command: %s" % arg_ns.command)
             exit_code = 1        
     except Exception as e:
-        logging.critical("Exception in __main__: %s" % e)
-        assert()
+        on_critical_exception(e, get_tb())        
         exit_code = 1
 
     logging.debug("Exiting with code: %d" % exit_code)
