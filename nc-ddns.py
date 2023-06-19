@@ -1,5 +1,5 @@
-## @file nc-ddns.py
-# @brief Namecheap Dyanmic DNS utilities
+#
+# nc-ddns.py : Namecheap Dyanmic DNS utilities
 #
 # Namecheap offers a great DDNS service, but the software (and router integration)
 # available to let Namecheap's DNS servers know when your public IP address has
@@ -8,8 +8,9 @@
 # This script aims to become the defacto standard for manual and automated
 # (e.g. via cron) updating of Namecheap DDNS records.
 #
-# @author Ryan M. Lederman <lederman@gmail.com>
-# @copyright The MIT License (MIT)
+# Author:     Ryan M. Lederman <lederman@gmail.com>
+# Copyright:  Copyright (C) 2023
+# License:    The MIT License (MIT)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of
 # this software and associated documentation files (the "Software"), to deal in
@@ -29,7 +30,9 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 
-__version__ = "0.1.2"
+#============================ Dependencies ====================================#
+
+__version__ = "0.1.3"
 __script_name__ = "nc-ddns.py"
 
 import requests
@@ -47,79 +50,68 @@ import os
 
 #============================== Constants =====================================#
 
-## The default timeouts for an HTTP GET request, in seconds (connect, read).
+# The default timeouts for an HTTP GET request, in seconds (connect, read).
 HTTP_TIMEOUTS = (6.05, 27.05)
 
-## The maximim number of times to retry a failed HTTP request.
+# The maximim number of times to retry a failed HTTP request.
 MAX_RETRIES = 15
 
-## The maximum HTTP redirects to tolerate.
+# The maximum HTTP redirects to tolerate.
 MAX_REDIRECTS = 3
 
-## The factor used to determine the next exponential backoff interval.
+# The factor used to determine the next exponential backoff interval.
 BACKOFF_FACTOR = 1.5
 
-##The amount of jitter to apply to the backoff interval.
+# The amount of jitter to apply to the backoff interval.
 BACKOFF_JITTER = 0.325
 
-## The longest possible retry backoff interval, in seconds.
+# The longest possible retry backoff interval, in seconds.
 MAX_BACKOFF = (5.0 * 60.0)
 
-## Namecheap DDNS API endpoint
+# Namecheap DDNS API endpoint
 NC_DDNS_URL = 'https://dynamicdns.park-your-domain.com/update'
 
-## The GitHub repository that this script was born in.
+# The GitHub repository that this script was born in.
 NC_DDNS_GH_REPO = 'https://github.com/aremmell/namecheap-ddns'
 
-## The link directly to README.md
+# The link directly to README.md
 NC_DDNS_GH_README = f'{NC_DDNS_GH_REPO}/blob/main/README.md'
 
-## The link directly to opening a new issue.
+# The link directly to opening a new issue.
 NC_DDNS_GH_NEWISSUE = f'{NC_DDNS_GH_REPO}/issues/new/choose'
 
-## The default service for resolution of public IP addresses.
-# @note This isn't necessary to update your address with Namecheap;
-# it is simply provided as a convenience.
+# The default service for resolution of public IP addresses.
 IP_SERVICE = 'https://api.ipify.org'
 
-## Whether or not to print the response body from Namecheap's server
+# Whether or not to print the response body from Namecheap's server
 # in the debug log. Disabled by default. Change this to 1 to enable.
 PRINT_XML_RESPONSE_BODY = 0
 
 #========================= Terminal syling ====================================#
 
-## Creates an ANSI escape sequence using the information supplied.
-# @param codes A sequence of command characters that terminals interpret in
-# order to manipulate the apppearance of terminal output.
-# @remark For example, the string `1;31;49` represents bold text with red as
-# the foreground color.
+# Creates an ANSI escape sequence using the information supplied.
 def ansi_esc(codes: str) -> str:
     return f'\x1b[{codes}m'
 
-## Ends an ANSI escape sequence and resets all styles and colors to normal.
+# Ends an ANSI escape sequence and resets all styles and colors to normal.
 def ansi_esc_end() -> str:
     return ansi_esc('0')
 
-## Generates a string wrapped in the begin/end sequences necessary to render
+# Generates a string wrapped in the begin/end sequences necessary to render
 # 16-color styling in the terminal.
-# @param msg The string to colorize/style.
-# @param attr 0=normal, 1=bold, 2=dim text
-# @param fg Foreground text color. The default value is the terminal's default.
-# @param bg Background text color. The default value is the terminal's default.
 def ansi_esc_basic(msg: str, attr: int = 0, fg: int = 39, bg: int = 49) -> str:
     return f'{ansi_esc(f"{str(attr)};{str(fg)};{str(bg)}")}{msg}{ansi_esc_end()}'
 
-## Generates a string that is red and bold in appearance for displaying errors.
+# Generates a string that is red and bold in appearance for displaying errors.
 def error_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 31)
 
-## Generates a string that is green and bold in appearance for displaying
-# success messages.
+# Generates a string that is green/bold in appearance for displaying success
+# messages.
 def success_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 32)
 
-## Generates a string that is yellow and bold in appearance for displaying
-# warnings.
+# Generates a string that is yellow/bold in appearance for displaying warnings.
 def warning_msg(msg: str) -> str:
     return ansi_esc_basic(msg, 1, 33)
 
@@ -273,7 +265,7 @@ def do_http_get_request(
         )
 
         session.mount('https://', HTTPAdapter(max_retries=retries))
-        session.mount('http://', HTTPAdapter(max_retries=retries))        
+        session.mount('http://', HTTPAdapter(max_retries=retries))
 
         logging.debug(
             f'Performing GET request to \'{url}\' with params:' +
@@ -314,7 +306,7 @@ def do_http_get_request(
         on_critical_exception(e, get_tb())
         return None
 
-#========================== Response parser ===================================#    
+#========================== Response parser ===================================#
 
 def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
     if PRINT_XML_RESPONSE_BODY != 0:
@@ -369,7 +361,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
         if m1: # got a match; error count = group 1
             n_err = int(m1.group(1))
             if n_err > 0: # extract the error message(s) from the second pattern.
-                logging.debug(f'errors: {n_err}; looking for error messages...')                
+                logging.debug(f'errors: {n_err}; looking for error messages...')
                 m2 = findall_xml(err_patterns[1], re_flags)
                 if m2:
                     for i in range(len(m2)):
@@ -429,7 +421,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
         on_critical_exception(e, get_tb())
         return False    
 
-#================================= CLI ========================================#    
+#================================= CLI ========================================#
 
 def build_cli_parser():
     # top-level parser
@@ -472,7 +464,7 @@ def build_cli_parser():
             f' {MAX_RETRIES} times, or until a non-retryable error is' +
              ' encountered. An exponential backoff algorithm is used to' +
              ' calculate the interval between retries. For further'
-             ' information, see `--docs`.',
+            f' information, see {NC_DDNS_GH_README}',
         action=IntGreaterThanZeroAction,
         type=int,
         default=MAX_RETRIES,
@@ -485,7 +477,7 @@ def build_cli_parser():
         help='Do not retry failed network transactions, but instead exit with' +
              ' an error.',
         action='store_true',
-    )    
+    )
 
     # update command
     sp_update = subparsers.add_parser(
@@ -511,9 +503,8 @@ def build_cli_parser():
         help='Your Namecheap DDNS password. This is *not* the same as your' +
              ' Namecheap account password.' +
              '' +
-             ' Locatte your DDNS password: \'Domain List\' -> (your domain) ->' +
-             ' \'Manage\', -> \'Domain\' drop-down -> \'Advanced DNS\'' +
-             ' Scroll down to \'Dynamic DNS.\'',
+             ' Locate your DDNS password: \'Domain List\' -> (the domain) ->' +
+             ' \'Manage\', -> \'Advanced DNS\' -> \'Dynamic DNS.\'',
         required=True,
         type=str,
         metavar='pw'
@@ -545,42 +536,17 @@ def build_cli_parser():
         '-s',
         '--service',
         help='If specified, override the third-party service used to resolve' +
-            f' your public IP address. (default: {IP_SERVICE})'
-             ' Note: the service must return a plaintext response containing only' +
-             ' the IPv4 address. Currently, that is the only response supported.',
-        required=False,             
+            f' your public IP address ({IP_SERVICE}). Note: the service must' +
+             ' return a plaintext response containing only the IPv4 address.' +
+             ' That is the only response currently supported.',
+        required=False,
         type=str,
         default=None,
         metavar='url'
     )
 
-    # docs command
-    sp_docs = subparsers.add_parser(
-        name='docs',
-        help='Obtain more information about this script, how to use it, and how' +
-             ' you can expect it to behave.'
-    )
-
-    docs_group = sp_docs.add_mutually_exclusive_group(
-        required=True
-    )
-
-    docs_group.add_argument(
-        '-o',
-        '--online',
-        help='Opens the online documentation in your default web browser.',
-        action='store_true'
-    )
-
-    docs_group.add_argument(
-        '-p',
-        '--print',
-        help='Print unformatted, limited documentation in the terminal.',
-        action='store_true'
-    )
-
     return argparser
-    
+
 # entry point for the 'update' command
 def do_update_request(arg_ns: argparse.Namespace):
     payload = dict(host = '@', domain = arg_ns.domain, password = arg_ns.password)
@@ -625,24 +591,16 @@ def do_resolve_request(arg_ns: argparse.Namespace):
             on_critical_exception(e, get_tb())
             return False
 
-# entry point for the 'docs' command
-def do_display_docs(arg_ns: argparse.Namespace) -> bool:
-    if arg_ns.print:
-        print("TODO: print limited documentation here; perhaps from an online file.")
-        return True
-    elif arg_ns.online:
-        return webbrowser.open(NC_DDNS_GH_README)
-    else:
-        return False
-    
 # script entry point
 if __name__ == "__main__":
     try:
         argparser = build_cli_parser()
         arg_ns = argparser.parse_args()
 
-        logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-                            level=logging.DEBUG if arg_ns.debug else logging.INFO)
+        logging.basicConfig(
+            format='%(asctime)s %(levelname)s %(message)s',
+            level=logging.DEBUG if arg_ns.debug else logging.INFO
+        )
 
         if arg_ns.debug:
             logging.debug("Debug logging enabled.")
@@ -654,13 +612,11 @@ if __name__ == "__main__":
             exit_code = 0 if do_resolve_request(arg_ns) else 1
         elif arg_ns.command == 'update':
             exit_code = 0 if do_update_request(arg_ns) else 1
-        elif arg_ns.command == 'docs':
-            exit_code = 0 if do_display_docs(arg_ns) else 1
         else:
             logging.error("Unknown command: %s" % arg_ns.command)
-            exit_code = 1        
+            exit_code = 1
     except Exception as e:
-        on_critical_exception(e, get_tb())        
+        on_critical_exception(e, get_tb())
         exit_code = 1
 
     logging.debug("Exiting with code: %d" % exit_code)

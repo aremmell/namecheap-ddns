@@ -1,2 +1,5 @@
 # annoying macOS files
 .DS_Store
+
+# MkDocs artifcats
+.cache/
