@@ -1,4 +1,4 @@
-# namecheap-ddns[^1]
+# namecheap-ddns
 
 A simple, lightweight Python script for updating [Namecheap Dynamic DNS](https://www.namecheap.com/support/knowledgebase/subcategory/11/dynamic-dns) records. You don’t even need to know your public IP address.
 
@@ -18,7 +18,7 @@ Other than installing dependencies, all that’s left to do is move `nc-ddns.py`
 
 The command-line interface is relatively simple; it is divided into sub-commands, of which there are currently two. The  full command-line takes this form:
 
-`python3 nc-ddns.py [top-level-arguments] &lt;command&gt; [command-specific-arguments]`
+`python3 nc-ddns.py [top-level-arguments] <command> [command-specific-arguments]`
 
 ### Top-level arguments
 
@@ -83,7 +83,7 @@ To summarize, the script will do its best to succeed every time it is executed, 
 
 ## Questions and Comments
 
-I welcome <u>any and all</u> feedback. Feel free to [write me](mailto://lederman@gmail.com) or open a [new issue](issues/new/choose) in the project.
+I welcome <u>any and all</u> feedback. Feel free to [write me](mailto://lederman@gmail.com) or open a [new issue](https://github.com/aremmell/namecheap-ddns/issues/new/choose) in the project.
 
 ## TODO List
 
@@ -100,4 +100,4 @@ The following is my task list for future releases. If you have any ideas, shoot 
 
 ------
 
-[^1]: Copyright &copy; 2023 Ryan M. Lederman, All Rights Reserved.
+Copyright &copy; 2023 Ryan M. Lederman, All Rights Reserved.
