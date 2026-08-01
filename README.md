@@ -33,7 +33,7 @@ There are two ‘top-level’ arguments that must come before any others:
 
 |   Command   | Description                                                  | Arguments                                                    |
 | :---------: | :----------------------------------------------------------- | :----------------------------------------------------------- |
-| **update**  | Perform a web transaction with Namecheap’s servers and ensure that your domain’s A record is up-to-date. | `-d/--domain` <u>domain</u> The TLD (top-level domain) that you would like to update the record for.<br />It is important to note that this is a *case-sensistive* argument. You must enter it in the same case as it appears in your Namecheap account.<br /><br />`-p/--password` <u>pw</u> Your Namecheap DDNS password. This is *not* the same as your account login password. Instructions for [locating your DDNS password](#locating-your-ddns-password) are further down the page.<br /><br />`-i/--ip` <u>addr</u> *(optional)* If you would prefer supplying the address yourself, use this flag. IPv4 addresses only.<br /><br />`-r/--retry` <u>num</u> *(optional)* The maximum number of times to retry the transaction if an error is encountered that is retryable. This flag is considered **on** by default if omitted and has the value `15`. See [Error Conditions](#error-conditions) for specifics.<br /><br />`-n/--no-retry` *(optional)* Disables retries. If any errors are encountered, the script will simply display an error and exit.<br /><br />`-h/--help` Displays a message containing this information. |
+| **update**  | Perform a web transaction with Namecheap’s servers and ensure that your domain’s A record is up-to-date. | `-d/--domain` <u>domain</u> The TLD (top-level domain) that you would like to update the record for.<br />It is important to note that this is a *case-sensistive* argument. You must enter it in the same case as it appears in your Namecheap account.<br /><br />`-H/--host` <u>hostname</u> The hostname (defaults to "@" if not supplied) to update the record for. `-p/--password` <u>pw</u> Your Namecheap DDNS password. This is *not* the same as your account login password. Instructions for [locating your DDNS password](#locating-your-ddns-password) are further down the page.<br /><br />`-i/--ip` <u>addr</u> *(optional)* If you would prefer supplying the address yourself, use this flag. IPv4 addresses only.<br /><br />`-r/--retry` <u>num</u> *(optional)* The maximum number of times to retry the transaction if an error is encountered that is retryable. This flag is considered **on** by default if omitted and has the value `15`. See [Error Conditions](#error-conditions) for specifics.<br /><br />`-n/--no-retry` *(optional)* Disables retries. If any errors are encountered, the script will simply display an error and exit.<br /><br />`-h/--help` Displays a message containing this information. |
 | **resolve** | Utilize a third-party web service to determine your public IPv4 address and display it. | Takes the same `-r/--retry` and `-n/--no-retry` arguments as the **update** command, plus:<br /><br />`-s/--service` <u>svc</u> *(optional)* If you wish to override the default IP address resolution service, use this flag and set the value to the service’s API endpoint URL. Note: currently, the script only parses plaintext IPv4 addresses as a response, so only services who comply with that will work *(unless you want to add parsing code yourself)*. |
 
 
@@ -76,9 +76,9 @@ To summarize, the script will do its best to succeed every time it is executed, 
 3. Click the *Advanced DNS* tab towards the top of the page.
 4. Scroll down until you reach *Dynamic DNS*. You should see something like this:
     ![nc-ddns-settings](./docs/res/nc-ddns-settings.png)
-    
+
     Don’t worry if you see a message that says “*No Records Found*” in the list below this area; if you scroll up the page further,
-    
+
     you’ll find an A record with your current *(last set)* IP address. If you like, you can hit the button next to the password to refresh and get a new password.
 
 ## Questions and Comments
@@ -99,5 +99,3 @@ The following is my task list for future releases. If you have any ideas, shoot 
 * [ ] Add an option to securely store an encrypted version of the password (paired with a domain), so that it’s not necessary to find it and paste it in the terminal every time you run the script manually.
 
 ------
-
-Copyright &copy; 2023 Ryan M. Lederman, All Rights Reserved.

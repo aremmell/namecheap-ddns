@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #
 # nc-ddns.py : Namecheap Dyanmic DNS utilities
 #
@@ -9,7 +10,7 @@
 # (e.g. via cron) updating of Namecheap DDNS records.
 #
 # Author:     Ryan M. Lederman <lederman@gmail.com>
-# Copyright:  Copyright (C) 2023
+# Copyright:  Copyright (C) 2026
 # License:    The MIT License (MIT)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -32,7 +33,7 @@
 
 #============================ Dependencies ====================================#
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __script_name__ = "nc-ddns.py"
 
 import requests
@@ -210,12 +211,12 @@ class HttpRetryError:
     _retry: NcDDNSRetry
     _err: Exception
     _response: HTTPResponse
-    
+
     def __init__(self, *args, **kwargs):
         self._retry = kwargs.get('retry', None)
         self._err   = kwargs.get('err', None)
         self._response = kwargs.get('response', None)
-    
+
     def __str__(self) -> str:
         retval: str = ''
         if self._err:
@@ -293,7 +294,7 @@ def do_http_get_request(
         else:
             logging.info(
                 ansi_esc_basic(
-                    'Request successful (%.03fsec); parsing response...' 
+                    'Request successful (%.03fsec); parsing response...'
                         % ((t_end - t_start) / 1e9),
                     1
                 )
@@ -319,12 +320,12 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
 
         m = re.search(pattern, xml_data, flags)
         if m is None:
-            logging.debug("No match: '%s'" % pattern)            
+            logging.debug("No match: '%s'" % pattern)
         else:
             logging.debug("Match: %r, groups: %r" % (m.group(), m.groups()))
 
         return m
-    
+
     def findall_xml(pattern: str, flags: re.RegexFlag) -> list[typing.Any]:
         logging.debug("Searching all instances of pattern: '%s'..." % pattern)
 
@@ -333,7 +334,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
             logging.debug("Match(es): %s" % m);
         else:
             logging.debug("No match: %s" % m)
-        
+
         return m
 
     try:
@@ -350,7 +351,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
         success_patterns = [
             r'<ErrCount>0</ErrCount>',
             r'<ResponseCount>0</ResponseCount>',
-            r'<IP>(.+)</IP>',            
+            r'<IP>(.+)</IP>',
         ]
 
         final_err_set = list(())
@@ -401,7 +402,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
             if all_succeeded:
                 logging.info(
                     success_msg(
-                        f'Successfully updated A record for {arg_ns.domain}' + 
+                        f'Successfully updated A record for {arg_ns.domain}/{arg_ns.host}' +
                         f' with IPv4 address: {final_result}'
                     )
                 );
@@ -409,7 +410,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
         else: # all done; print final list of errors and return.
             logging.error(
                 error_msg(
-                    f'Failed to update A record for {arg_ns.domain}!' +
+                    f'Failed to update A record for {arg_ns.domain}/{arg_ns.host}!' +
                     f' Found these error(s) in the response body:\n'
                 )
             );
@@ -419,7 +420,7 @@ def parse_xml_response(xml_data: str, arg_ns: argparse.Namespace):
             return False
     except re.error as e:
         on_critical_exception(e, get_tb())
-        return False    
+        return False
 
 #================================= CLI ========================================#
 
@@ -498,6 +499,16 @@ def build_cli_parser():
     )
 
     sp_update.add_argument(
+        '-H',
+        '--host',
+        help='The hostname to update the A record for (default: "@").',
+        required=False,
+        type=str,
+        default='@',
+        metavar='host'
+    )
+
+    sp_update.add_argument(
         '-p',
         '--password',
         help='Your Namecheap DDNS password. This is *not* the same as your' +
@@ -549,7 +560,9 @@ def build_cli_parser():
 
 # entry point for the 'update' command
 def do_update_request(arg_ns: argparse.Namespace):
-    payload = dict(host = '@', domain = arg_ns.domain, password = arg_ns.password)
+    if (arg_ns is None):
+        return False
+    payload = dict(host = arg_ns.host, domain = arg_ns.domain, password = arg_ns.password)
     if (arg_ns.ip is not None):
         payload['ip'] = arg_ns.ip
 
